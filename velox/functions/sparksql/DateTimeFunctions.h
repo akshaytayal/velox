@@ -17,6 +17,7 @@
 #pragma once
 
 #include <boost/algorithm/string.hpp>
+#include <limits>
 
 #include "velox/functions/lib/DateTimeFormatter.h"
 #include "velox/functions/lib/TimeUtils.h"
@@ -565,6 +566,7 @@ struct DateFromUnixDateFunction {
 
 /// Truncates a timestamp to a specified time unit. Return NULL if the format is
 /// invalid. Format as abbreviated unit string and "microseconds" are allowed.
+/// Throws if the result does not fit in int64 microseconds.
 template <typename T>
 struct DateTruncFunction {
   VELOX_DEFINE_FUNCTION_TYPES(T);
@@ -591,6 +593,16 @@ struct DateTruncFunction {
       return false;
     }
     result = truncateTimestamp(timestamp, unitOption.value(), timeZone_);
+    // Spark stores timestamps as int64 microseconds and throws
+    // ArithmeticException("long overflow") when the truncated value does not
+    // fit, e.g. when truncating the minimum timestamp to a coarser unit.
+    const __int128_t micros =
+        static_cast<__int128_t>(result.getSeconds()) * 1'000'000 +
+        result.getNanos() / 1'000;
+    if (micros < std::numeric_limits<int64_t>::min() ||
+        micros > std::numeric_limits<int64_t>::max()) {
+      VELOX_ARITHMETIC_ERROR("long overflow");
+    }
     return true;
   }
 

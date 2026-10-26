@@ -1628,6 +1628,73 @@ TEST_F(DateTimeFunctionsTest, dateTrunc) {
       dateTrunc("year", Timestamp(998'474'645, 321'001'234)));
 }
 
+TEST_F(DateTimeFunctionsTest, dateTruncOverflow) {
+  const auto dateTrunc = [&](const std::string& format,
+                             std::optional<Timestamp> timestamp) {
+    return evaluateOnce<Timestamp>(
+        fmt::format("date_trunc('{}', c0)", format), timestamp);
+  };
+  const auto minMicros =
+      Timestamp::fromMicros(std::numeric_limits<int64_t>::min());
+  const auto maxMicros =
+      Timestamp::fromMicros(std::numeric_limits<int64_t>::max());
+
+  // Truncating the minimum timestamp moves it below the int64 microseconds
+  // range, so Spark throws ArithmeticException("long overflow").
+  for (const auto* timeZone : {"UTC", "America/Los_Angeles", "Asia/Shanghai"}) {
+    SCOPED_TRACE(timeZone);
+    setQueryTimeZone(timeZone);
+    for (const auto* unit :
+         {"year",
+          "quarter",
+          "month",
+          "week",
+          "day",
+          "hour",
+          "minute",
+          "second",
+          "millisecond"}) {
+      SCOPED_TRACE(unit);
+      VELOX_ASSERT_USER_THROW_CODE(
+          dateTrunc(unit, minMicros),
+          error_code::kArithmeticError,
+          "long overflow");
+    }
+    EXPECT_EQ(minMicros, dateTrunc("microsecond", minMicros));
+    EXPECT_EQ(maxMicros, dateTrunc("microsecond", maxMicros));
+  }
+
+  // Truncation never moves a timestamp forward, so the maximum timestamp
+  // (294247-01-10 04:00:54.775807 UTC) is truncated without overflow.
+  setQueryTimeZone("UTC");
+  EXPECT_EQ(
+      Timestamp(9'223'372'036'854, 775'000'000),
+      dateTrunc("millisecond", maxMicros));
+  EXPECT_EQ(Timestamp(9'223'372'036'854, 0), dateTrunc("second", maxMicros));
+  EXPECT_EQ(Timestamp(9'223'372'036'800, 0), dateTrunc("minute", maxMicros));
+  EXPECT_EQ(Timestamp(9'223'372'036'800, 0), dateTrunc("hour", maxMicros));
+  EXPECT_EQ(Timestamp(9'223'372'022'400, 0), dateTrunc("day", maxMicros));
+  EXPECT_EQ(Timestamp(9'223'371'504'000, 0), dateTrunc("week", maxMicros));
+  EXPECT_EQ(Timestamp(9'223'371'244'800, 0), dateTrunc("month", maxMicros));
+  EXPECT_EQ(Timestamp(9'223'371'244'800, 0), dateTrunc("quarter", maxMicros));
+  EXPECT_EQ(Timestamp(9'223'371'244'800, 0), dateTrunc("year", maxMicros));
+
+  // Velox timestamps outside the int64 microseconds range cannot be
+  // represented in Spark.
+  VELOX_ASSERT_USER_THROW_CODE(
+      dateTrunc(
+          "microsecond",
+          Timestamp(maxMicros.getSeconds(), maxMicros.getNanos() + 1'000)),
+      error_code::kArithmeticError,
+      "long overflow");
+  VELOX_ASSERT_USER_THROW_CODE(
+      dateTrunc(
+          "microsecond",
+          Timestamp(minMicros.getSeconds(), minMicros.getNanos() - 1'000)),
+      error_code::kArithmeticError,
+      "long overflow");
+}
+
 TEST_F(DateTimeFunctionsTest, trunc) {
   const auto trunc = [&](std::optional<int32_t> date,
                          const std::string& format) {
