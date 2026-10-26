@@ -14,11 +14,13 @@
  * limitations under the License.
  */
 
+#include <arrow/io/memory.h>
 #include <gmock/gmock.h>
 #include <numeric>
 
 #include "velox/common/Casts.h"
 #include "velox/common/base/tests/GTestUtils.h"
+#include "velox/common/file/File.h"
 #include "velox/dwio/common/Mutation.h"
 #include "velox/dwio/parquet/common/ParquetRuntimeStats.h"
 #include "velox/dwio/parquet/reader/ParquetColumnReader.h"
@@ -28,6 +30,9 @@
 #include "velox/dwio/parquet/reader/StructColumnReader.h"
 #include "velox/dwio/parquet/tests/ParquetTestBase.h"
 #include "velox/dwio/parquet/thrift/ParquetThrift.h"
+#include "velox/dwio/parquet/writer/arrow/ColumnWriter.h"
+#include "velox/dwio/parquet/writer/arrow/FileWriter.h"
+#include "velox/dwio/parquet/writer/arrow/Schema.h"
 #include "velox/expression/ExprToSubfieldFilter.h"
 #include "velox/vector/tests/utils/VectorMaker.h"
 
@@ -72,6 +77,31 @@ class ParquetReaderTest : public ParquetTestBase {
     return {
         sourceReader->fileType().column(),
         sourceReader->fileType().type()->kind()};
+  }
+
+  static constexpr vector_size_t kNullTypeDataRows = 7;
+
+  /// Returns kNullTypeDataRows rows of top-level, struct, array and map
+  /// columns whose leaf values are all null and of 'nullType'.
+  RowVectorPtr makeNullTypeData(const TypePtr& nullType) {
+    auto nullColumn =
+        BaseVector::createNullConstant(nullType, kNullTypeDataRows, pool());
+    auto structNullColumn = makeRowVector(
+        {"n"},
+        {BaseVector::createNullConstant(nullType, kNullTypeDataRows, pool())},
+        [](vector_size_t row) { return row == 3; });
+    auto arrayNullColumn = makeArrayVector(
+        {0, 2, 2, 3, 3, 6, 6},
+        BaseVector::createNullConstant(nullType, 6, pool()),
+        {1});
+    auto mapNullColumn = makeMapVector(
+        {0, 1, 1, 3, 3, 4, 4},
+        makeFlatVector<std::string>({"a", "b", "c", "d"}),
+        BaseVector::createNullConstant(nullType, 4, pool()),
+        {1, 5});
+    return makeRowVector(
+        {"unknown", "struct_unknown", "array_unknown", "map_unknown"},
+        {nullColumn, structNullColumn, arrayNullColumn, mapNullColumn});
   }
 
   void assertReadWithExpected(
@@ -2253,41 +2283,13 @@ TEST_F(ParquetReaderTest, columnStatisticsMultipleRowGroups) {
 }
 
 TEST_F(ParquetReaderTest, readNullTypeWithRequestedSchema) {
-  constexpr vector_size_t kRows = 7;
-  const auto rowType =
-      ROW({"unknown", "struct_unknown", "array_unknown", "map_unknown"},
-          {UNKNOWN(),
-           ROW({"n"}, {UNKNOWN()}),
-           ARRAY(UNKNOWN()),
-           MAP(VARCHAR(), UNKNOWN())});
-
-  auto unknownVector =
-      BaseVector::createNullConstant(UNKNOWN(), kRows, pool_.get());
-  auto structUnknownVector = makeRowVector(
-      {"n"},
-      {BaseVector::createNullConstant(UNKNOWN(), kRows, pool_.get())},
-      [](vector_size_t row) { return row == 3; });
-  auto arrayUnknownVector = makeArrayVector(
-      {0, 2, 2, 3, 3, 6, 6},
-      BaseVector::createNullConstant(UNKNOWN(), 6, pool_.get()),
-      {1});
-  auto mapUnknownVector = makeMapVector(
-      {0, 1, 1, 3, 3, 4, 4},
-      makeFlatVector<std::string>({"a", "b", "c", "d"}),
-      BaseVector::createNullConstant(UNKNOWN(), 4, pool_.get()),
-      {1, 5});
-
-  auto data = makeRowVector(
-      rowType->names(),
-      {unknownVector,
-       structUnknownVector,
-       arrayUnknownVector,
-       mapUnknownVector});
+  auto data = makeNullTypeData(UNKNOWN());
+  const auto rowType = asRowType(data->type());
 
   auto* sink = write(data);
   auto reader = createReaderInMemory(*sink);
 
-  EXPECT_EQ(reader->numberOfRows(), kRows);
+  EXPECT_EQ(reader->numberOfRows(), kNullTypeDataRows);
   EXPECT_EQ(reader->rowType()->toString(), rowType->toString());
 
   auto scanSpec = makeScanSpec(rowType);
@@ -2298,6 +2300,102 @@ TEST_F(ParquetReaderTest, readNullTypeWithRequestedSchema) {
   auto rowReader = reader->createRowReader(rowReaderOpts);
 
   assertReadWithReaderAndExpected(rowType, *rowReader, data, *leafPool_);
+}
+
+TEST_F(ParquetReaderTest, readNullTypeAsPhysicalType) {
+  // Velox writes null columns as INT32 annotated with the UNKNOWN logical
+  // type. Like parquet-mr, read them with the physical type when a type other
+  // than UNKNOWN is requested.
+  auto* sink = write(makeNullTypeData(UNKNOWN()));
+
+  auto expected = makeNullTypeData(INTEGER());
+  const auto requestedType = asRowType(expected->type());
+  auto readerOptions = makeDefaultReaderOptions();
+  readerOptions.setFileSchema(requestedType);
+  auto reader = createReaderInMemory(*sink, readerOptions);
+  EXPECT_EQ(reader->rowType()->toString(), requestedType->toString());
+
+  auto rowReader = createRowReaderFromReader(*reader, requestedType);
+  assertReadWithReaderAndExpected(
+      requestedType, *rowReader, expected, *leafPool_);
+
+  // The physical type still has to match the requested type.
+  auto varcharTypes = requestedType->children();
+  varcharTypes[0] = VARCHAR();
+  readerOptions.setFileSchema(
+      ROW(std::vector<std::string>(requestedType->names()),
+          std::move(varcharTypes)));
+  VELOX_ASSERT_THROW(
+      createReaderInMemory(*sink, readerOptions),
+      "Converted type INTEGER is not allowed for requested type VARCHAR for file column 'unknown'");
+}
+
+TEST_F(ParquetReaderTest, readSparkNullType) {
+  // Spark writes NullType as BOOLEAN annotated with the UNKNOWN logical type.
+  constexpr int64_t kRows = 5;
+  namespace parquetArrow = facebook::velox::parquet::arrow;
+  parquetArrow::schema::NodeVector fields{
+      parquetArrow::schema::PrimitiveNode::make(
+          "bool_null",
+          parquetArrow::Repetition::kOptional,
+          parquetArrow::LogicalType::nullType(),
+          parquetArrow::Type::kBoolean),
+      parquetArrow::schema::PrimitiveNode::make(
+          "int_null",
+          parquetArrow::Repetition::kOptional,
+          parquetArrow::LogicalType::nullType(),
+          parquetArrow::Type::kInt32),
+  };
+  auto schema = std::static_pointer_cast<parquetArrow::schema::GroupNode>(
+      parquetArrow::schema::GroupNode::make(
+          "spark_schema", parquetArrow::Repetition::kRequired, fields));
+  auto sink = ::arrow::io::BufferOutputStream::Create().ValueOrDie();
+  auto fileWriter = parquetArrow::ParquetFileWriter::open(sink, schema);
+  auto* rowGroupWriter = fileWriter->appendRowGroup();
+  const std::vector<int16_t> definitionLevels(kRows, 0);
+  static_cast<parquetArrow::BoolWriter*>(rowGroupWriter->nextColumn())
+      ->writeBatch(kRows, definitionLevels.data(), nullptr, nullptr);
+  static_cast<parquetArrow::Int32Writer*>(rowGroupWriter->nextColumn())
+      ->writeBatch(kRows, definitionLevels.data(), nullptr, nullptr);
+  fileWriter->close();
+  auto buffer = sink->Finish().ValueOrDie();
+  const std::string fileData(
+      reinterpret_cast<const char*>(buffer->data()), buffer->size());
+
+  const auto readFile = [&](const RowTypePtr& requestedType) {
+    auto readerOptions = makeDefaultReaderOptions();
+    if (requestedType) {
+      readerOptions.setFileSchema(requestedType);
+    }
+    return std::make_unique<ParquetReader>(
+        std::make_unique<BufferedInput>(
+            std::make_shared<InMemoryReadFile>(fileData),
+            readerOptions.memoryPool()),
+        readerOptions);
+  };
+  const auto assertRead = [&](const RowTypePtr& requestedType) {
+    auto reader = readFile(requestedType);
+    EXPECT_EQ(reader->numberOfRows(), kRows);
+    EXPECT_EQ(reader->rowType()->toString(), requestedType->toString());
+    auto rowReader = createRowReaderFromReader(*reader, requestedType);
+    auto expected = makeRowVector(
+        requestedType->names(),
+        {BaseVector::createNullConstant(
+             requestedType->childAt(0), kRows, pool_.get()),
+         BaseVector::createNullConstant(
+             requestedType->childAt(1), kRows, pool_.get())});
+    assertReadWithReaderAndExpected(
+        requestedType, *rowReader, expected, *leafPool_);
+  };
+
+  // Without a requested type, and when UNKNOWN is requested, the columns are
+  // read as UNKNOWN.
+  const auto unknownType =
+      ROW({"bool_null", "int_null"}, {UNKNOWN(), UNKNOWN()});
+  EXPECT_EQ(readFile(nullptr)->rowType()->toString(), unknownType->toString());
+  assertRead(unknownType);
+  // Otherwise, the physical types are used.
+  assertRead(ROW({"bool_null", "int_null"}, {BOOLEAN(), INTEGER()}));
 }
 
 TEST_F(ParquetReaderTest, timestampFilters) {

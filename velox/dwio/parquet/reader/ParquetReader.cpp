@@ -1112,19 +1112,14 @@ TypePtr ReaderBase::convertType(
   if (schemaElement.logicalType() &&
       schemaElement.logicalType()->getType() ==
           thrift::LogicalType::Type::UNKNOWN) {
-    VELOX_CHECK(
-        !requestedType ||
-            isCompatible(
-                requestedType,
-                isRepeated,
-                [](const TypePtr& type) {
-                  return type->kind() == TypeKind::UNKNOWN;
-                }),
-        kTypeMappingErrorFmtStr,
-        "UNKNOWN",
-        requestedType->toString(),
-        *schemaElement.name());
-    return UNKNOWN();
+    if (!requestedType ||
+        isCompatible(requestedType, isRepeated, [](const TypePtr& type) {
+          return type->kind() == TypeKind::UNKNOWN;
+        })) {
+      return UNKNOWN();
+    }
+    // An UNKNOWN (null) column holds only nulls. Like parquet-mr, ignore the
+    // annotation when another type is requested and map the physical type.
   }
 
   if (schemaElement.converted_type()) {
