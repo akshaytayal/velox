@@ -1532,7 +1532,7 @@ Spark-specific Configuration
    * - spark.collect_list.ignore_nulls
      - bool
      - true
-     - If true, Spark ``collect_list`` aggregate function ignores nulls in the input.
+     - If true, Spark ``collect_list`` aggregate function ignores nulls in the input. Only applies when ``collect_list`` is called without the ``ignoreNulls`` argument.
    * - spark.decimal_to_float_high_precision_cast_enabled
      - bool
      - false

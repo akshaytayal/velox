@@ -19,6 +19,7 @@
 #include "velox/exec/SimpleAggregateAdapter.h"
 #include "velox/functions/lib/aggregates/ValueList.h"
 #include "velox/functions/sparksql/SparkQueryConfig.h"
+#include "velox/vector/ConstantVector.h"
 
 using namespace facebook::velox::aggregate;
 using namespace facebook::velox::exec;
@@ -47,8 +48,8 @@ class CollectListAggregate {
 
   // Whether null input values should be ignored. Defaults to true.
   // NOTE: toIntermediate() was intentionally removed because it is static and
-  // cannot access the runtime ignoreNulls_ config. Without it, partial
-  // aggregation uses the accumulator path, which correctly respects the config.
+  // cannot access the runtime ignoreNulls_ flag. Without it, partial
+  // aggregation uses the accumulator path, which correctly respects the flag.
   bool ignoreNulls_{true};
 
   void initialize(
@@ -57,6 +58,23 @@ class CollectListAggregate {
       const TypePtr& /*resultType*/,
       const core::QueryConfig& config) {
     ignoreNulls_ = SparkQueryConfig{config}.collectListIgnoreNulls();
+  }
+
+  // The 2-argument form collect_list(x, ignoreNulls) takes the flag as a
+  // constant, which overrides the 'spark.collect_list.ignore_nulls' config.
+  // Steps that take intermediate results have a single input and keep the
+  // config value, which they don't use: combine() keeps all elements.
+  void setConstantInputs(const std::vector<VectorPtr>& constantInputs) {
+    if (constantInputs.size() < 2) {
+      return;
+    }
+    const auto& ignoreNulls = constantInputs[1];
+    VELOX_USER_CHECK_NOT_NULL(
+        ignoreNulls, "ignoreNulls argument of collect_list must be constant");
+    VELOX_USER_CHECK(
+        !ignoreNulls->isNullAt(0),
+        "ignoreNulls argument of collect_list must not be null");
+    ignoreNulls_ = ignoreNulls->as<ConstantVector<bool>>()->valueAt(0);
   }
 
   struct AccumulatorType {
@@ -128,11 +146,22 @@ void registerCollectListAggregate(
     bool withCompanionFunctions,
     bool overwrite) {
   std::vector<std::shared_ptr<exec::AggregateFunctionSignature>> signatures{
+      // collect_list(E) -> array(E): ignoreNulls comes from the
+      // 'spark.collect_list.ignore_nulls' config (true by default).
       exec::AggregateFunctionSignatureBuilder()
           .typeVariable("E")
           .returnType("array(E)")
           .intermediateType("array(E)")
           .argumentType("E")
+          .build(),
+      // collect_list(E, ignoreNulls) -> array(E): explicit ignoreNulls flag,
+      // e.g. false for Spark's collect_list(x) RESPECT NULLS.
+      exec::AggregateFunctionSignatureBuilder()
+          .typeVariable("E")
+          .returnType("array(E)")
+          .intermediateType("array(E)")
+          .argumentType("E")
+          .constantArgumentType("boolean")
           .build()};
   exec::registerAggregateFunction(
       names,
@@ -143,8 +172,12 @@ void registerCollectListAggregate(
           const TypePtr& resultType,
           const core::QueryConfig& config) -> std::unique_ptr<exec::Aggregate> {
         const std::string& name = names.front();
-        VELOX_CHECK_EQ(
-            argTypes.size(), 1, "{} takes at most one argument", name);
+        // collect_list(E, boolean) has two arguments. collect_list(E) and the
+        // companion functions that take the intermediate result have one.
+        VELOX_CHECK(
+            argTypes.size() == 1 || argTypes.size() == 2,
+            "{} takes one or two arguments",
+            name);
         return std::make_unique<SimpleAggregateAdapter<CollectListAggregate>>(
             step, argTypes, resultType, &config);
       },

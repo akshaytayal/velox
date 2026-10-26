@@ -178,5 +178,142 @@ TEST_F(CollectListAggregateTest, respectNullsAllNulls) {
       expectedResult,
       makeConfig(false));
 }
+
+// collect_list(x, ignoreNulls) takes the flag as a constant argument, which
+// overrides the 'spark.collect_list.ignore_nulls' config. This is how Spark's
+// collect_list(x) RESPECT NULLS is passed per aggregate.
+TEST_F(CollectListAggregateTest, ignoreNullsArgument) {
+  auto data = makeRowVector(
+      {makeFlatVector<int32_t>({0, 0, 1, 1, 1, 2}),
+       makeNullableFlatVector<int64_t>(
+           {std::nullopt, 1, 2, std::nullopt, 3, std::nullopt})});
+  auto respectNulls = makeRowVector(
+      {makeFlatVector<int32_t>({0, 1, 2}),
+       makeNullableArrayVector<int64_t>(
+           std::vector<std::vector<std::optional<int64_t>>>{
+               {std::nullopt, 1}, {2, std::nullopt, 3}, {std::nullopt}})});
+  auto ignoreNulls = makeRowVector(
+      {makeFlatVector<int32_t>({0, 1, 2}),
+       makeArrayVectorFromJson<int64_t>({"[1]", "[2, 3]", "[]"})});
+
+  for (const bool configIgnoreNulls : {true, false}) {
+    SCOPED_TRACE(fmt::format("configIgnoreNulls: {}", configIgnoreNulls));
+    testAggregations(
+        {data},
+        {"c0"},
+        {"spark_collect_list(c1, false)"},
+        {"c0", "a0"},
+        {respectNulls},
+        makeConfig(configIgnoreNulls));
+    testAggregations(
+        {data},
+        {"c0"},
+        {"spark_collect_list(c1, true)"},
+        {"c0", "a0"},
+        {ignoreNulls},
+        makeConfig(configIgnoreNulls));
+  }
+}
+
+// Aggregates in the same query can use different ignoreNulls flags.
+TEST_F(CollectListAggregateTest, mixedIgnoreNulls) {
+  auto data = makeRowVector(
+      {makeNullableFlatVector<int32_t>({1, std::nullopt, 2, std::nullopt, 3})});
+  auto expected = makeRowVector(
+      {makeArrayVectorFromJson<int32_t>({"[1, 2, 3]"}),
+       makeNullableArrayVector<int32_t>(
+           std::vector<std::vector<std::optional<int32_t>>>{
+               {1, std::nullopt, 2, std::nullopt, 3}}),
+       makeArrayVectorFromJson<int32_t>({"[1, 2, 3]"})});
+  testAggregations(
+      {data},
+      {},
+      {"spark_collect_list(c0)",
+       "spark_collect_list(c0, false)",
+       "spark_collect_list(c0, true)"},
+      {expected});
+
+  // All inputs are null.
+  data = makeRowVector({makeAllNullFlatVector<int32_t>(3)});
+  expected = makeRowVector(
+      {makeArrayVectorFromJson<int32_t>({"[]"}),
+       makeNullableArrayVector<int32_t>(
+           std::vector<std::vector<std::optional<int32_t>>>{
+               {std::nullopt, std::nullopt, std::nullopt}})});
+  testAggregations(
+      {data},
+      {},
+      {"spark_collect_list(c0)", "spark_collect_list(c0, false)"},
+      {expected});
+}
+
+// The partial companion function receives the constant ignoreNulls argument.
+TEST_F(CollectListAggregateTest, ignoreNullsArgumentCompanion) {
+  auto data = makeRowVector(
+      {makeFlatVector<int32_t>({0, 0, 1, 1, 1, 2, 0, 1}),
+       makeNullableFlatVector<int64_t>(
+           {std::nullopt, 1, 2, std::nullopt, 3, std::nullopt, 4, 5})});
+  // array_sort puts nulls last.
+  auto expected = makeRowVector(
+      {makeFlatVector<int32_t>({0, 1, 2}),
+       makeNullableArrayVector<int64_t>(
+           std::vector<std::vector<std::optional<int64_t>>>{
+               {1, 4, std::nullopt},
+               {2, 3, 5, std::nullopt},
+               {std::nullopt}})});
+  testAggregationsWithCompanion(
+      {data},
+      [](auto& /*builder*/) {},
+      {"c0"},
+      {"spark_collect_list(c1, false)"},
+      {{BIGINT(), BOOLEAN()}},
+      {"c0", "array_sort(a0)"},
+      {expected});
+
+  expected = makeRowVector(
+      {makeFlatVector<int32_t>({0, 1, 2}),
+       makeArrayVectorFromJson<int64_t>({"[1, 4]", "[2, 3, 5]", "[]"})});
+  testAggregationsWithCompanion(
+      {data},
+      [](auto& /*builder*/) {},
+      {"c0"},
+      {"spark_collect_list(c1, true)"},
+      {{BIGINT(), BOOLEAN()}},
+      {"c0", "array_sort(a0)"},
+      {expected},
+      makeConfig(false));
+}
+
+// Window functions receive the constant ignoreNulls argument.
+TEST_F(CollectListAggregateTest, ignoreNullsArgumentWindow) {
+  auto data = makeRowVector(
+      {makeFlatVector<int32_t>({0, 0, 0, 1, 1}),
+       makeFlatVector<int32_t>({1, 2, 3, 1, 2}),
+       makeNullableFlatVector<int64_t>(
+           {std::nullopt, 1, std::nullopt, 2, std::nullopt})});
+
+  auto plan =
+      exec::test::PlanBuilder()
+          .values({data})
+          .window(
+              {"spark_collect_list(c2, false) over (partition by c0 order by c1)",
+               "spark_collect_list(c2, true) over (partition by c0 order by c1)"})
+          .planNode();
+  auto expected = makeRowVector(
+      {makeFlatVector<int32_t>({0, 0, 0, 1, 1}),
+       makeFlatVector<int32_t>({1, 2, 3, 1, 2}),
+       makeNullableFlatVector<int64_t>(
+           {std::nullopt, 1, std::nullopt, 2, std::nullopt}),
+       makeNullableArrayVector<int64_t>(
+           std::vector<std::vector<std::optional<int64_t>>>{
+               {std::nullopt},
+               {std::nullopt, 1},
+               {std::nullopt, 1, std::nullopt},
+               {2},
+               {2, std::nullopt}}),
+       makeArrayVectorFromJson<int64_t>({"[]", "[1]", "[1]", "[2]", "[2]"})});
+  exec::test::AssertQueryBuilder(plan).assertResults(expected);
+}
+
 } // namespace
 } // namespace facebook::velox::functions::aggregate::sparksql::test
