@@ -16,6 +16,7 @@
 
 #include "velox/connectors/hive/FileConfig.h"
 #include <gtest/gtest.h>
+#include <optional>
 
 #include "velox/common/base/tests/GTestUtils.h"
 #include "velox/common/config/Config.h"
@@ -175,6 +176,39 @@ TEST(FileConfigTest, overrideSession) {
   EXPECT_TRUE(config.nimbleDictionaryAwareReads(session.get()));
   EXPECT_TRUE(config.nimbleScanFastPath(session.get()));
   EXPECT_TRUE(config.nimbleLazyColumnIo(session.get()));
+}
+
+TEST(FileConfigTest, ignoreMissingFilesTableParameterOverridesSession) {
+  FileConfig config(
+      std::make_shared<config::ConfigBase>(
+          std::unordered_map<std::string, std::string>()),
+      "hive.");
+  const auto verify = [&](bool sessionValue,
+                          std::optional<std::string> tableValue,
+                          bool expected) {
+    const auto session = std::make_unique<config::ConfigBase>(
+        std::unordered_map<std::string, std::string>{
+            {FileConfig::kIgnoreMissingFilesSession,
+             sessionValue ? "true" : "false"}});
+    std::unordered_map<std::string, std::string> tableParameters;
+    if (tableValue.has_value()) {
+      tableParameters[FileConfig::kIgnoreMissingFilesSession] = *tableValue;
+    }
+    EXPECT_EQ(
+        config.ignoreMissingFiles(session.get(), tableParameters), expected);
+  };
+
+  verify(/*sessionValue=*/false, /*tableValue=*/std::nullopt, false);
+  verify(/*sessionValue=*/true, /*tableValue=*/std::nullopt, true);
+  verify(/*sessionValue=*/false, /*tableValue=*/"true", true);
+  verify(/*sessionValue=*/true, /*tableValue=*/"false", false);
+
+  const auto session = std::make_unique<config::ConfigBase>(
+      std::unordered_map<std::string, std::string>());
+  VELOX_ASSERT_USER_THROW(
+      config.ignoreMissingFiles(
+          session.get(), {{FileConfig::kIgnoreMissingFilesSession, "maybe"}}),
+      "Invalid value for table parameter ignore_missing_files: maybe");
 }
 
 TEST(FileConfigTest, nimbleScanFastPathSessionOverridesCatalog) {

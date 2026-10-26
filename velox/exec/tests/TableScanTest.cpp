@@ -2211,6 +2211,46 @@ TEST_F(TableScanTest, fileNotFound) {
       "No such file or directory");
 }
 
+TEST_F(TableScanTest, fileNotFoundTableParameter) {
+  auto assertMissingFile = [&](bool sessionIgnoreMissingFiles,
+                               bool tableIgnoreMissingFiles) {
+    auto tableHandle = makeTableHandle(
+        common::SubfieldFilters{},
+        /*remainingFilter=*/nullptr,
+        "hive_table",
+        rowType_,
+        /*indexColumns=*/{},
+        {{HiveConfig::kIgnoreMissingFilesSession,
+          tableIgnoreMissingFiles ? "true" : "false"}});
+    auto plan = PlanBuilder()
+                    .startTableScan()
+                    .outputType(rowType_)
+                    .tableHandle(tableHandle)
+                    .assignments(allRegularColumns(rowType_))
+                    .endTableScan()
+                    .planNode();
+    auto split =
+        exec::test::HiveConnectorSplitBuilder("/path/to/nowhere.orc").build();
+    AssertQueryBuilder(plan)
+        .connectorSessionProperty(
+            kHiveConnectorId,
+            HiveConfig::kIgnoreMissingFilesSession,
+            sessionIgnoreMissingFiles ? "true" : "false")
+        .split(split)
+        .assertEmptyResults();
+  };
+
+  // The table parameter overrides the session property in both directions.
+  assertMissingFile(
+      /*sessionIgnoreMissingFiles=*/false, /*tableIgnoreMissingFiles=*/true);
+  VELOX_ASSERT_RUNTIME_THROW_CODE(
+      assertMissingFile(
+          /*sessionIgnoreMissingFiles=*/true,
+          /*tableIgnoreMissingFiles=*/false),
+      error_code::kFileNotFound,
+      "No such file or directory");
+}
+
 // A valid ORC file (containing headers) but no data.
 TEST_F(TableScanTest, validFileNoData) {
   auto rowType = ROW({"c0", "c1", "c2"}, {DOUBLE(), VARCHAR(), BIGINT()});

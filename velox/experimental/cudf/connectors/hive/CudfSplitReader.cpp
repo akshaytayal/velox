@@ -554,8 +554,8 @@ void CudfSplitReader::setupCudfDataSource() {
       split_->filePath);
 
   const HiveConfig hiveConfig(cudfHiveConfig_->config());
-  const bool ignoreMissingFiles =
-      hiveConfig.ignoreMissingFiles(connectorQueryCtx_->sessionProperties());
+  const bool ignoreMissingFiles = hiveConfig.ignoreMissingFiles(
+      connectorQueryCtx_->sessionProperties(), tableHandle_->tableParameters());
 
   // Helper to create a KvikIO data source.
   auto makeKvikioDataSource = [&]() {

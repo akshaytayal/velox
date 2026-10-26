@@ -16,6 +16,8 @@
 
 #include "velox/connectors/hive/FileConfig.h"
 
+#include <folly/Conv.h>
+
 #include "velox/common/config/Config.h"
 
 namespace facebook::velox::connector::hive {
@@ -56,6 +58,22 @@ const std::vector<config::ConfigProperty>& FileConfig::registeredProperties() {
     return properties;
   }();
   return kProperties;
+}
+
+bool FileConfig::ignoreMissingFiles(
+    const config::ConfigBase* session,
+    const std::unordered_map<std::string, std::string>& tableParameters) const {
+  const auto it = tableParameters.find(kIgnoreMissingFilesSession);
+  if (it == tableParameters.end()) {
+    return ignoreMissingFiles(session);
+  }
+  const auto value = folly::tryTo<bool>(it->second);
+  VELOX_USER_CHECK(
+      value.hasValue(),
+      "Invalid value for table parameter {}: {}",
+      kIgnoreMissingFilesSession,
+      it->second);
+  return value.value();
 }
 
 int32_t FileConfig::maxCoalescedDistanceBytes(

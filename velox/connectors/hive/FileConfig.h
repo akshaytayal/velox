@@ -18,6 +18,7 @@
 #include <limits>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include "velox/common/base/Exceptions.h"
 #include "velox/common/config/Config.h"
@@ -165,6 +166,16 @@ class FileConfig {
         kIgnoreMissingFilesSession,
         kIgnoreMissingFilesSessionProperty::defaultValue);
   }
+
+  /// Returns whether to ignore missing files when scanning a table with
+  /// 'tableParameters'. A kIgnoreMissingFilesSession entry in
+  /// 'tableParameters' overrides the session property. This lets scans in the
+  /// same query use different values, e.g. Spark's per-read
+  /// 'ignoreMissingFiles' data source option.
+  bool ignoreMissingFiles(
+      const config::ConfigBase* session,
+      const std::unordered_map<std::string, std::string>& tableParameters)
+      const;
 
   VELOX_HIVE_CONFIG(
       kMaxCoalescedBytesSession,

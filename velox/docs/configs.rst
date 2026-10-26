@@ -874,6 +874,7 @@ Common Options
      - bool
      - false
      - If true, splits that refer to missing files don't generate errors and are processed as empty splits. Session: ``ignore_missing_files``.
+       An ``ignore_missing_files`` entry in the table handle's table parameters overrides the session property for that scan.
    * - ``max-coalesced-bytes``
      - integer
      - 128MB
