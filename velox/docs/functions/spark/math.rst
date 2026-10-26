@@ -348,6 +348,17 @@ Mathematical Functions
         SELECT not false; -- true
         SELECT not NULL; -- NULL
 
+.. spark:function:: normalize_nan_and_zero(x) -> [same as x]
+
+    Returns 0.0 if ``x`` is -0.0, the canonical NaN if ``x`` is any NaN, and
+    ``x`` otherwise. Spark's optimizer inserts this function (NormalizeNaNAndZero)
+    before operations that compare floating-point values by their bits, such as
+    join and grouping keys, so that -0.0 and 0.0, and all NaNs, are the same.
+    Returns NULL if ``x`` is NULL. Supported types are: REAL, DOUBLE. ::
+
+        SELECT normalize_nan_and_zero(-0.0); -- 0.0
+        SELECT normalize_nan_and_zero(cast('NaN' as double)); -- NaN
+
 .. spark:function:: pmod(n, m) -> [same as n]
 
     Returns the positive remainder of n divided by m.

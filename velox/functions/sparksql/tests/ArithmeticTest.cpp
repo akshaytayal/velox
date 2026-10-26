@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#include <bit>
 #include <cstdint>
 #include <limits>
 
@@ -749,6 +750,62 @@ TEST_F(ArithmeticTest, isNanDouble) {
   EXPECT_EQ(true, isNan(kNanDouble));
   EXPECT_EQ(true, isNan(0.0 / 0.0));
   EXPECT_EQ(false, isNan(std::nullopt));
+}
+
+TEST_F(ArithmeticTest, normalizeNaNAndZero) {
+  const auto testNormalize = [&]<typename T, typename TBits>(
+                                 T input, TBits expectedBits) {
+    SCOPED_TRACE(fmt::format("input bits: {:#x}", std::bit_cast<TBits>(input)));
+    const auto result =
+        evaluateOnce<T>("normalize_nan_and_zero(c0)", std::optional<T>(input));
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(expectedBits, std::bit_cast<TBits>(result.value()));
+  };
+
+  // Java's canonical Double.NaN and Float.NaN.
+  constexpr uint64_t kDoubleNaN = 0x7ff8000000000000;
+  constexpr uint32_t kFloatNaN = 0x7fc00000;
+
+  testNormalize(-0.0, uint64_t{0});
+  testNormalize(0.0, uint64_t{0});
+  testNormalize(1.5, std::bit_cast<uint64_t>(1.5));
+  testNormalize(-1.5, std::bit_cast<uint64_t>(-1.5));
+  testNormalize(
+      std::numeric_limits<double>::infinity(),
+      std::bit_cast<uint64_t>(std::numeric_limits<double>::infinity()));
+  testNormalize(
+      -std::numeric_limits<double>::infinity(),
+      std::bit_cast<uint64_t>(-std::numeric_limits<double>::infinity()));
+  testNormalize(
+      std::numeric_limits<double>::denorm_min(),
+      std::bit_cast<uint64_t>(std::numeric_limits<double>::denorm_min()));
+  testNormalize(std::numeric_limits<double>::quiet_NaN(), kDoubleNaN);
+  testNormalize(-std::numeric_limits<double>::quiet_NaN(), kDoubleNaN);
+  testNormalize(
+      std::bit_cast<double>(uint64_t{0x7ff0000000000001}), kDoubleNaN);
+  testNormalize(
+      std::bit_cast<double>(uint64_t{0xfff8dead0000beef}), kDoubleNaN);
+
+  testNormalize(-0.0f, uint32_t{0});
+  testNormalize(0.0f, uint32_t{0});
+  testNormalize(1.5f, std::bit_cast<uint32_t>(1.5f));
+  testNormalize(-1.5f, std::bit_cast<uint32_t>(-1.5f));
+  testNormalize(
+      -std::numeric_limits<float>::infinity(),
+      std::bit_cast<uint32_t>(-std::numeric_limits<float>::infinity()));
+  testNormalize(std::numeric_limits<float>::quiet_NaN(), kFloatNaN);
+  testNormalize(-std::numeric_limits<float>::quiet_NaN(), kFloatNaN);
+  testNormalize(std::bit_cast<float>(uint32_t{0x7f800001}), kFloatNaN);
+  testNormalize(std::bit_cast<float>(uint32_t{0xffc0beef}), kFloatNaN);
+
+  EXPECT_EQ(
+      std::nullopt,
+      evaluateOnce<double>(
+          "normalize_nan_and_zero(c0)", std::optional<double>()));
+  EXPECT_EQ(
+      std::nullopt,
+      evaluateOnce<float>(
+          "normalize_nan_and_zero(c0)", std::optional<float>()));
 }
 
 TEST_F(ArithmeticTest, hexWithBigint) {
